@@ -1,0 +1,180 @@
+#!/bin/bash
+
+#=================================================
+# GENERIC STARTING
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+#=================================================
+# MANAGE SCRIPT FAILURE
+#=================================================
+
+# Exit if an error occurs during the execution of the script
+ynh_abort_if_errors
+
+#=================================================
+# RETRIEVE ARGUMENTS FROM THE MANIFEST
+#=================================================
+
+domain=$YNH_APP_ARG_DOMAIN
+path_url=$YNH_APP_ARG_PATH
+admin_user=$YNH_APP_ARG_ADMIN_USER
+ynh_print_OFF
+upload_password=$YNH_APP_ARG_UPLOAD_PASSWORD
+ynh_print_ON
+is_public=$YNH_APP_ARG_IS_PUBLIC
+
+app=$YNH_APP_INSTANCE_NAME
+
+#=================================================
+# CHECK IF THE APP CAN BE INSTALLED WITH THESE ARGS
+#=================================================
+ynh_script_progression --message="Validating installation parameters..." --weight=1
+
+final_path=/var/www/$app
+test ! -e "$final_path" || ynh_die "This path already contains a folder"
+
+# Register (book) web path
+ynh_webpath_register --app=$app --domain=$domain --path_url=$path_url
+
+#=================================================
+# STORE SETTINGS FROM MANIFEST
+#=================================================
+ynh_script_progression --message="Storing installation settings..." --weight=1
+
+ynh_app_setting_set --app=$app --key=domain --value=$domain
+ynh_app_setting_set --app=$app --key=path --value=$path_url
+ynh_app_setting_set --app=$app --key=admin --value=$admin_user
+ynh_app_setting_set --app=$app --key=is_public --value=$is_public
+
+#=================================================
+# STANDARD MODIFICATIONS
+#=================================================
+# DOWNLOAD, CHECK AND UNPACK SOURCE
+#=================================================
+ynh_script_progression --message="Setting up source files..." --weight=3
+
+ynh_app_setting_set --app=$app --key=final_path --value=$final_path
+# Download, check integrity, uncompress and patch the source from app.src
+ynh_setup_source --dest_dir="$final_path"
+
+#=================================================
+# NGINX CONFIGURATION
+#=================================================
+ynh_script_progression --message="Configuring NGINX web server..."
+
+# Create a dedicated NGINX config
+ynh_add_nginx_config
+
+#=================================================
+# CREATE DEDICATED USER
+#=================================================
+ynh_script_progression --message="Configuring system user..." --weight=2
+
+# Create a system user
+ynh_system_user_create --username=$app
+
+#=================================================
+# PHP-FPM CONFIGURATION
+#=================================================
+ynh_script_progression --message="Configuring PHP-FPM..." --weight=2
+
+# Create a dedicated PHP-FPM config
+ynh_add_fpm_config
+phpversion=$(ynh_app_setting_get --app=$app --key=phpversion)
+
+#=================================================
+# SPECIFIC SETUP
+#=================================================
+# SET AND SAVE THE UPLOAD PASSWORD
+#=================================================
+
+jyrafonconfigfile="$final_path/lib/config.local.php"
+cp "../conf/config.local.php" "$jyrafonconfigfile"
+
+# Set and save upload password, allowing an empty one
+ynh_print_OFF
+if [ -z "$upload_password" ]
+then
+	ynh_replace_string --match_string="__YNH_UPLOAD_PASSWORD__" --replace_string="" --target_file="$jyrafonconfigfile"
+	ynh_app_setting_set --app=$app --key=upload_password --value=""
+else
+	ynh_replace_special_string --match_string="__YNH_UPLOAD_PASSWORD__" --replace_string="'$upload_password'" --target_file="$jyrafonconfigfile"
+	ynh_app_setting_set --app=$app --key=upload_password --value="$upload_password"
+fi
+ynh_print_ON
+
+#=================================================
+# CONFIGURE JYRAFON
+#=================================================
+ynh_script_progression --message="Configuring Jyrafon..." --weight=2
+
+var_root=/home/yunohost.app/$app
+
+ynh_replace_string --match_string="__YNH_DOMAIN__" --replace_string="$domain" --target_file="$jyrafonconfigfile"
+if [ "$path_url" = "/" ]
+then
+	ynh_replace_string --match_string="__YNH_WWW_PATH__" --replace_string="" --target_file="$jyrafonconfigfile"
+else
+	ynh_replace_string --match_string="__YNH_WWW_PATH__" --replace_string="$path_url" --target_file="$jyrafonconfigfile"
+fi
+ynh_replace_string --match_string="__YNH_VAR_ROOT__" --replace_string="$var_root" --target_file="$jyrafonconfigfile"
+ynh_replace_string --match_string="__YNH_ADMIN_USER__" --replace_string="$admin_user" --target_file="$jyrafonconfigfile"
+
+# Calculate and store the config file checksum into the app settings
+ynh_store_file_checksum --file="$jyrafonconfigfile"
+
+# Remove the install.php
+ynh_secure_remove --file=$final_path/install.php
+
+#=================================================
+# SET THE CRON FILE
+#=================================================
+ynh_script_progression --message="Configuring the cron file..." --weight=2
+
+cp ../conf/cron /etc/cron.d/$app
+ynh_replace_string --match_string="__FINALPATH__" --replace_string="$final_path" --target_file=/etc/cron.d/$app
+ynh_replace_string --match_string="__APP__" --replace_string=$app --target_file=/etc/cron.d/$app
+ynh_replace_string --match_string="__PHPVERSION__" --replace_string=$phpversion --target_file=/etc/cron.d/$app
+
+#=================================================
+# GENERIC FINALISATION
+#=================================================
+# SECURING FILES AND DIRECTORIES
+#=================================================
+
+chown -R root: $final_path
+
+mkdir -p $var_root/{files,links,async,block}
+chown -R $app:root $var_root
+chmod -R 700 $var_root
+
+#=================================================
+# SETUP SSOWAT
+#=================================================
+ynh_script_progression --message="Configuring SSOwat..." --weight=2
+
+ynh_app_setting_set --app=$app --key=unprotected_uris --value="/"
+if [ $is_public -eq 0 ]
+then
+	domain_regex=$(echo "$domain" | sed 's@-@.@g')
+	[ "$path_url" = "/" ] && path_url=""
+	ynh_app_setting_set --app=$app --key=protected_regex --value="$domain_regex$path_url/$","$domain_regex$path_url/admin.php.*$"
+fi
+
+#=================================================
+# RELOAD NGINX
+#=================================================
+ynh_script_progression --message="Reloading NGINX web server..." --weight=1
+
+ynh_systemd_action --service_name=nginx --action=reload
+
+#=================================================
+# END OF SCRIPT
+#=================================================
+
+ynh_script_progression --message="Installation of Jyrafon completed" --last

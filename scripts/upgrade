@@ -1,0 +1,261 @@
+#!/bin/bash
+
+#=================================================
+# GENERIC STARTING
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+#=================================================
+# LOAD SETTINGS
+#=================================================
+ynh_script_progression --message="Loading installation settings..." --weight=2
+
+app=$YNH_APP_INSTANCE_NAME
+
+domain=$(ynh_app_setting_get --app=$app --key=domain)
+path_url=$(ynh_app_setting_get --app=$app --key=path)
+admin_user=$(ynh_app_setting_get --app=$app --key=admin)
+is_public=$(ynh_app_setting_get --app=$app --key=is_public)
+final_path=$(ynh_app_setting_get --app=$app --key=final_path)
+ynh_print_OFF
+upload_password=$(ynh_app_setting_get --app=$app --key=upload_password)
+ynh_print_ON
+phpversion=$(ynh_app_setting_get --app=$app --key=phpversion)
+
+#=================================================
+# CHECK VERSION
+#=================================================
+
+upgrade_type=$(ynh_check_app_version_changed)
+
+#=================================================
+# ENSURE DOWNWARD COMPATIBILITY
+#=================================================
+ynh_script_progression --message="Ensuring downward compatibility..." --weight=1
+
+# Fix is_public as a boolean value
+if [ "$is_public" = "Yes" ]; then
+	ynh_app_setting_set --app=$app --key=is_public --value=1
+	is_public=1
+elif [ "$is_public" = "No" ]; then
+	ynh_app_setting_set --app=$app --key=is_public --value=0
+	is_public=0
+fi
+
+# If final_path doesn't exist, create it
+if [ -z "$final_path" ]; then
+	final_path=/var/www/$app
+	ynh_app_setting_set --app=$app --key=final_path --value=$final_path
+fi
+
+# Migrate files from 3.4.1 to 4.1.1
+current_version="$(ynh_app_upstream_version --manifest="/etc/yunohost/apps/$app/manifest.json")"
+update_version="$(ynh_app_upstream_version)"
+# If the upgrade if from a version 3 or less to 4 or more. Migrate the files
+if [ ${current_version:0:1} -le 3 ] && [ ${update_version:0:1} -ge 4 ]
+then
+    ynh_script_progression --message="Migrating files..." --weight=5
+
+    var_root=/home/yunohost.app/$app
+
+    # Migrate files and links to the new directory structure
+    for type in files links
+    do
+            while read file
+            do
+                    # Ignore _count files
+                    if echo "$file" | grep --quiet "_count$"; then
+                            continue
+                    fi
+
+                    # Remove all directories before the file name
+                    full_file="$file"
+                    file=$(basename $file)
+
+                    # Split the file name every 8 characters
+                    split=0
+                    full_path="$var_root/$type"
+                    while [ $split -le ${#file} ]
+                    do
+                            part_dir="${file:$split:8}"
+                            # Increment the point where with start reading of 8.
+                            split=$((split+8))
+                            full_path="$full_path/$part_dir"
+                    done
+
+                    # Create the new crazy directory structure
+                    mkdir -p "$full_path"
+                    # And move the file to this place
+                    mv "$full_file" "$full_path/$file"
+                    if [ "$type" = "files" ]; then
+                            mv "${full_file}_count" "$full_path"
+                    fi
+            done <<< "$(find "$var_root/$type" -type f)" # List all files, without directories
+    done
+
+    # And clean the old directories
+    for type in files links
+    do
+            while read file
+            do
+                    # Remove all directories before the last one
+                    dirname="$(basename $file)"
+                    # Delete the directory if it's only one character long
+                    if [ ${#dirname} -eq 1 ]
+                    then
+                            ynh_secure_remove --file="$file"
+                    fi
+            done <<< "$(find "$var_root/$type" -maxdepth 1 -mindepth 1 -type d)" # List all first level directories
+    done
+fi
+
+#=================================================
+# BACKUP BEFORE UPGRADE THEN ACTIVE TRAP
+#=================================================
+ynh_script_progression --message="Backing up Jyrafon before upgrading (may take a while)..." --weight=3
+
+# Backup the current version of the app
+ynh_backup_before_upgrade
+ynh_clean_setup () {
+	# restore it if the upgrade fails
+	ynh_restore_upgradebackup
+}
+# Exit if an error occurs during the execution of the script
+ynh_abort_if_errors
+
+#=================================================
+# STANDARD UPGRADE STEPS
+#=================================================
+# DOWNLOAD, CHECK AND UNPACK SOURCE
+#=================================================
+
+if [ "$upgrade_type" == "UPGRADE_APP" ]
+then
+	ynh_script_progression --message="Upgrading source files..." --weight=2
+
+	# Download, check integrity, uncompress and patch the source from app.src
+	ynh_setup_source --dest_dir="$final_path"
+fi
+
+#=================================================
+# NGINX CONFIGURATION
+#=================================================
+ynh_script_progression --message="Upgrading NGINX web server configuration..." --weight=2
+
+# Create a dedicated NGINX config
+ynh_add_nginx_config
+
+#=================================================
+# CREATE DEDICATED USER
+#=================================================
+ynh_script_progression --message="Making sure dedicated system user exists..." --weight=1
+
+# Create a dedicated user (if not existing)
+ynh_system_user_create --username=$app
+
+#=================================================
+# PHP-FPM CONFIGURATION
+#=================================================
+ynh_script_progression --message="Upgrading PHP-FPM configuration..." --weight=2
+
+# Create a dedicated PHP-FPM config
+ynh_add_fpm_config
+
+#=================================================
+# SPECIFIC UPGRADE
+#=================================================
+# SET THE UPLOAD PASSWORD
+#=================================================
+
+jyrafonconfigfile="$final_path/lib/config.local.php"
+
+ynh_backup_if_checksum_is_different --file="$final_path/lib/config.local.php"
+
+cp "../conf/config.local.php" "$final_path/lib/config.local.php"
+
+# Set and save upload password, allowing an empty one
+ynh_print_OFF
+if [ -z "$upload_password" ]
+then
+    ynh_replace_string --match_string="__YNH_UPLOAD_PASSWORD__" --replace_string="" --target_file="$jyrafonconfigfile"
+	ynh_app_setting_set --app=$app --key=upload_password --value=""
+else
+    ynh_replace_special_string --match_string="__YNH_UPLOAD_PASSWORD__" --replace_string="'$upload_password'" --target_file="$jyrafonconfigfile"
+	ynh_app_setting_set --app=$app --key=upload_password --value="$upload_password"
+fi
+ynh_print_ON
+
+#=================================================
+# CONFIGURE JYRAFON
+#=================================================
+ynh_script_progression --message="Upgrading Jyrafon configuration..." --weight=2
+
+var_root=/home/yunohost.app/$app
+
+ynh_replace_string --match_string="__YNH_DOMAIN__" --replace_string="$domain" --target_file="$jyrafonconfigfile"
+if [ "$path_url" = "/" ]
+then
+	ynh_replace_string --match_string="__YNH_WWW_PATH__" --replace_string="" --target_file="$jyrafonconfigfile"
+else
+	ynh_replace_string --match_string="__YNH_WWW_PATH__" --replace_string="$path_url" --target_file="$jyrafonconfigfile"
+fi
+ynh_replace_string --match_string="__YNH_VAR_ROOT__" --replace_string="$var_root" --target_file="$jyrafonconfigfile"
+ynh_replace_string --match_string="__YNH_ADMIN_USER__" --replace_string="$admin_user" --target_file="$jyrafonconfigfile"
+
+# Recalculate and store the checksum of the file for the next upgrade.
+ynh_store_file_checksum --file="$jyrafonconfigfile"
+
+# Remove the install.php
+ynh_secure_remove --file=$final_path/install.php
+
+#=================================================
+# SET THE CRON FILE
+#=================================================
+ynh_script_progression --message="Configuring the cron file..." --weight=1
+
+cp ../conf/cron /etc/cron.d/$app
+ynh_replace_string --match_string="__FINALPATH__" --replace_string="$final_path" --target_file=/etc/cron.d/$app
+ynh_replace_string --match_string="__APP__" --replace_string=$app --target_file=/etc/cron.d/$app
+ynh_replace_string --match_string="__PHPVERSION__" --replace_string=$phpversion --target_file=/etc/cron.d/$app
+
+#=================================================
+# GENERIC FINALISATION
+#=================================================
+# SECURING FILES AND DIRECTORIES
+#=================================================
+
+chown -R root: $final_path
+
+mkdir -p $var_root/{files,links,async,block}
+chown -R $app:root $var_root
+chmod -R 700 $var_root
+
+#=================================================
+# SETUP SSOWAT
+#=================================================
+ynh_script_progression --message="Upgrading SSOwat configuration..." --weight=2
+
+ynh_app_setting_set --app=$app --key=unprotected_uris --value="/"
+if [ $is_public -eq 0 ]
+then
+	domain_regex=$(echo "$domain" | sed 's@-@.@g')
+	[ "$path_url" = "/" ] && path_url=""
+	ynh_app_setting_set --app=$app --key=protected_regex --value="$domain_regex$path_url/$","$domain_regex$path_url/admin.php.*$"
+fi
+
+#=================================================
+# RELOAD NGINX
+#=================================================
+ynh_script_progression --message="Reloading NGINX web server..." --weight=1
+
+ynh_systemd_action --service_name=nginx --action=reload
+
+#=================================================
+# END OF SCRIPT
+#=================================================
+
+ynh_script_progression --message="Upgrade of Jyrafon completed" --last

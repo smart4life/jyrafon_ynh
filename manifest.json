@@ -1,0 +1,75 @@
+{
+	"name": "Jyrafon",
+	"id": "jyrafon",
+	"packaging_format": 1,
+	"description": {
+		"en": "Upload a file in a simple way and give a unique link to it",
+		"fr": "Hébergez simplement un fichier et partagez-le avec un lien unique"
+	},
+	"version": "1.0.0~ynh1",
+	"url": "https://github.com/smart4life/Jyrafon",
+	"license": "AGPL-3.0-only",
+	"maintainer": {
+		"name": "Sébastien",
+		"email": ""
+	},
+	"requirements": {
+		"yunohost": ">= 4.0.0"
+	},
+	"multi_instance": false,
+	"services": [
+		"nginx",
+		"php7.0-fpm"
+	],
+	"arguments": {
+		"install" : [
+			{
+				"name": "domain",
+				"type": "domain",
+				"ask": {
+					"en": "Choose a domain for Jyrafon",
+					"fr": "Choisissez un domaine pour Jyrafon"
+				},
+				"example": "domain.org"
+			},
+			{
+				"name": "path",
+				"type": "path",
+				"ask": {
+					"en": "Choose a path for Jyrafon",
+					"fr": "Choisissez un chemin pour Jyrafon"
+				},
+				"example": "/jyrafon",
+				"default": "/jyrafon"
+			},
+			{
+				"name": "admin_user",
+				"type": "user",
+				"ask": {
+					"en": "Choose an admin user (will be able to access admin.php page)",
+					"fr": "Choisissez l'administrateur (seul autorisé à accéder à la page admin.php)"
+				},
+				"example": "johndoe"
+			},
+			{
+				"name": "upload_password",
+				"type": "password",
+				"optional": true,
+				"ask": {
+					"en": "Set the password granting upload permissions (leave empty to allow anybody to upload)",
+					"fr": "Définissez le mot de passe permettant l'accès à l'envoi de fichiers (laissez vide pour autoriser tout le monde)"
+				},
+				"example": "supersecretpassword"
+			},
+			{
+				"name": "is_public",
+				"type": "boolean",
+				"ask": {
+					"en": "Is it a public Jyrafon site?",
+					"fr": "Est-ce un site public ?"
+				},
+				"default": true
+			}
+		]
+	}
+}

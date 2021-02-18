@@ -1,0 +1,6 @@
+SOURCE_URL=https://github.com/smart4life/Jyrafon/archive/5.0.0.tar.gz
+SOURCE_SUM=11a33b6934ae33610b5a1e45d0ea8bf7134b0dbbf5dbfba9410fc5feb7a2f792
+SOURCE_SUM_PRG=sha256sum
+SOURCE_FORMAT=tar.gz
+SOURCE_IN_SUBDIR=true
+SOURCE_FILENAME=
